@@ -89,7 +89,11 @@ fn parse_args() -> (String, String) {
 function used to create domain socket
 **/
 fn create_socket(ip: String, port: String) -> OwnedFd {
-    let addr_str = format!("{}:{}", ip, port);
+    let addr_str = if ip.contains(':') {
+        format!("[{}]:{}", ip, port)
+    } else {
+        format!("{}:{}", ip, port)
+    }; 
 
     // Try IPv4 first
     if let Ok(sockaddr_v4) = SockaddrIn::from_str(&addr_str) {

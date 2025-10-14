@@ -69,7 +69,12 @@ fn parse_args() -> (String, String, String, String) {
 function to create network socket
 **/
 fn create_socket(ip: &str, port: &str) -> OwnedFd {
-    let addr_str = format!("{}:{}", ip, port);
+    // If the address looks like IPv6, wrap in []
+    let addr_str = if ip.contains(':') {
+        format!("[{}]:{}", ip, port)
+    } else {
+        format!("{}:{}", ip, port)
+    }; 
 
     // Try IPv4 first
     if SockaddrIn::from_str(&addr_str).is_ok() {
@@ -97,7 +102,11 @@ fn create_socket(ip: &str, port: &str) -> OwnedFd {
 function to connect to the server using the network socket
 **/
 fn connect_to_server(sock: &OwnedFd, ip: &str, port: &str) {
-    let addr_str = format!("{}:{}", ip, port);
+   let addr_str = if ip.contains(':') {
+        format!("[{}]:{}", ip, port)
+    } else {
+        format!("{}:{}", ip, port)
+    };  
 
     // Try IPv4 first
     if let Ok(sockaddr_v4) = SockaddrIn::from_str(&addr_str) {

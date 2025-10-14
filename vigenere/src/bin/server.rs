@@ -1,22 +1,11 @@
 use libc::{_exit};
-use nix::sys::socket::recv;
-use nix::sys::socket::{socket, Backlog, SockaddrStorage};
-use nix::{
-    errno::Errno,
-    sys::{
-        signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal},
-        socket::{
-            accept, bind, getpeername, listen, send, AddressFamily, MsgFlags, SockFlag, SockType, SockaddrIn, SockaddrIn6,
-        },
-        wait::{waitpid, WaitPidFlag, WaitStatus},
-    },
-    unistd::{close, fork, ForkResult},
-};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::{env, process};
 use std::{str::FromStr};
 use serde::Deserialize;
 use Signal::SIGCHLD;
+use std::net::TcpListener;
+use polling::{Event, Events, Poller};
 
 ///sighandler to handle child processes
 extern "C" fn sigchld_handler(_signal: libc::c_int) {
@@ -35,10 +24,10 @@ main function to act as the driver for the server
 **/
 fn main() {
 
+    let key = 7;    
+
     let (ip, port) = parse_args();
     let sock = create_socket(ip, port);
-
-    listen_for_connections(&sock);
 
     let handler = SigHandler::Handler(sigchld_handler);
     let sa = SigAction::new(handler, SaFlags::empty(), SigSet::empty());
@@ -47,24 +36,20 @@ fn main() {
     };
 
     println!("server: waiting for connections...");
-    loop {
-        let session_sock = accept_client(&sock);
 
-        match unsafe { fork() }.expect("server: fork failed") {
-            ForkResult::Child => {
-                close_socket(&sock);
+    for stream in sock.incoming() {
+        match stream {
+            Ok(stream) => {
+                let msg_in = receive_message(&stream.as_raw_rd());
 
-                let incoming = receive_message(&session_sock);
+                let key = msg_in.encrypt_key.as_bytes();
+                let msg = encrypt_message(msg_in.message.as_bytes(), &key);
 
-                let key = incoming.encrypt_key.as_bytes();
-                let msg = encrypt_message(incoming.message.as_bytes(), &key);
+                send_message(&stream.as_raw_fd, &msg);
 
-                send_message(&session_sock, &msg);
-
-                close_socket(&session_sock);
-                unsafe { _exit(0) }
+                close_socket(stream.as_raw_fd());
             }
-            _ => drop(session_sock),
+            Err(e) => {//Connection failed}
         }
     }
 }
@@ -88,59 +73,19 @@ fn parse_args() -> (String, String) {
 /**
 function used to create domain socket
 **/
-fn create_socket(ip: String, port: String) -> OwnedFd {
-    let addr_str = if ip.contains(':') {
-        format!("[{}]:{}", ip, port)
+fn create_socket(ip: String, port: String) -> TcpListener {
+    if ip.contains(':') {
+        let addr_str = format!("[{}]:{}", ip, port);
+        let socket = TcpListener::bind(addr_str).unwrap();
+        socket.set_nonblocking(true);
+        
+        socket
     } else {
-        format!("{}:{}", ip, port)
-    }; 
+        let addr_str = format!("{}:{}", ip, port);
+        let socket = TcpListener::bind(addr_str).unwrap();
+        socket.set_nonblocking(true);
 
-    // Try IPv4 first
-    if let Ok(sockaddr_v4) = SockaddrIn::from_str(&addr_str) {
-        let sock = socket(AddressFamily::Inet, SockType::Stream, SockFlag::empty(), None)
-            .expect("create_socket: failed to create IPv4 socket");
-        bind(sock.as_raw_fd(), &sockaddr_v4).expect("create_socket: bind failed (IPv4)");
-        println!("Server bound to IPv4 address {}", addr_str);
-        sock
-    }
-    // Then try IPv6
-    else if let Ok(sockaddr_v6) = SockaddrIn6::from_str(&addr_str) {
-        let sock = socket(AddressFamily::Inet6, SockType::Stream, SockFlag::empty(), None)
-            .expect("create_socket: failed to create IPv6 socket");
-        bind(sock.as_raw_fd(), &sockaddr_v6).expect("create_socket: bind failed (IPv6)");
-        println!("Server bound to IPv6 address {}", addr_str);
-        sock
-    }
-    // Neither IPv4 nor IPv6 worked
-    else {
-        eprintln!("create_socket: invalid or unsupported IP '{}'", ip);
-        process::exit(1);
-    }
-}
-
-/**
-function to listen for clients
-**/
-fn listen_for_connections(sock: &OwnedFd) {
-    let backlog = Backlog::new(10).unwrap();
-    listen(sock, backlog).expect("server listen failed");
-}
-
-/**
-function used to accept clients
-**/
-fn accept_client(sock: &OwnedFd) -> OwnedFd {
-    loop {
-        match accept(sock.as_raw_fd()) {
-            Err(Errno::EINTR) => continue,
-            Ok(raw_fd) => {
-                if let Ok(_saddr) = getpeername::<SockaddrStorage>(raw_fd) {
-                    println!("server: got connection from client");
-                }
-                return unsafe { OwnedFd::from_raw_fd(raw_fd) };
-            }
-            _ => panic!("server: accept failed"),
-        }
+        socket
     }
 }
 
